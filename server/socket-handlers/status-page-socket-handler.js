@@ -18,7 +18,7 @@ module.exports.statusPageSocketHandler = (socket) => {
     // Post or edit incident
     socket.on("postIncident", async (slug, incident, callback) => {
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             let statusPageID = await StatusPage.slugToID(slug);
 
@@ -71,7 +71,7 @@ module.exports.statusPageSocketHandler = (socket) => {
 
     socket.on("unpinIncident", async (slug, callback) => {
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             let statusPageID = await StatusPage.slugToID(slug);
 
@@ -92,7 +92,7 @@ module.exports.statusPageSocketHandler = (socket) => {
 
     socket.on("getStatusPage", async (slug, callback) => {
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             let statusPage = await R.findOne("status_page", " slug = ? ", [
                 slug
@@ -118,7 +118,7 @@ module.exports.statusPageSocketHandler = (socket) => {
     // imgDataUrl Only Accept PNG!
     socket.on("saveStatusPage", async (slug, config, imgDataUrl, publicGroupList, callback) => {
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             // Save Config
             let statusPage = await R.findOne("status_page", " slug = ? ", [
@@ -211,6 +211,10 @@ module.exports.statusPageSocketHandler = (socket) => {
                         relationBean.send_url = monitor.sendUrl;
                     }
 
+                    if (monitor.url !== undefined) {
+                        relationBean.custom_url = monitor.url;
+                    }
+
                     await R.store(relationBean);
                 }
 
@@ -220,13 +224,17 @@ module.exports.statusPageSocketHandler = (socket) => {
 
             // Delete groups that are not in the list
             log.debug("socket", "Delete groups that are not in the list");
-            const slots = groupIDList.map(() => "?").join(",");
+            if (groupIDList.length === 0) {
+                await R.exec("DELETE FROM `group` WHERE status_page_id = ?", [ statusPage.id ]);
+            } else {
+                const slots = groupIDList.map(() => "?").join(",");
 
-            const data = [
-                ...groupIDList,
-                statusPage.id
-            ];
-            await R.exec(`DELETE FROM \`group\` WHERE id NOT IN (${slots}) AND status_page_id = ?`, data);
+                const data = [
+                    ...groupIDList,
+                    statusPage.id
+                ];
+                await R.exec(`DELETE FROM \`group\` WHERE id NOT IN (${slots}) AND status_page_id = ?`, data);
+            }
 
             const server = UptimeKumaServer.getInstance();
 
@@ -256,7 +264,7 @@ module.exports.statusPageSocketHandler = (socket) => {
     // Add a new status page
     socket.on("addStatusPage", async (title, slug, callback) => {
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             title = title?.trim();
             slug = slug?.trim();
@@ -288,6 +296,7 @@ module.exports.statusPageSocketHandler = (socket) => {
                 ok: true,
                 msg: "successAdded",
                 msgi18n: true,
+                slug: slug
             });
 
         } catch (error) {
@@ -304,7 +313,7 @@ module.exports.statusPageSocketHandler = (socket) => {
         const server = UptimeKumaServer.getInstance();
 
         try {
-            checkLogin(socket);
+            await checkLogin(socket);
 
             let statusPageID = await StatusPage.slugToID(slug);
 

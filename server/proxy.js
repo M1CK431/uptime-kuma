@@ -1,7 +1,7 @@
 const { R } = require("redbean-node");
-const HttpProxyAgent = require("http-proxy-agent");
-const HttpsProxyAgent = require("https-proxy-agent");
-const SocksProxyAgent = require("socks-proxy-agent");
+const { HttpProxyAgent } = require("http-proxy-agent");
+const { HttpsProxyAgent } = require("https-proxy-agent");
+const { SocksProxyAgent } = require("socks-proxy-agent");
 const { debug } = require("../src/util");
 const { UptimeKumaServer } = require("./uptime-kuma-server");
 const { CookieJar } = require("tough-cookie");
@@ -22,7 +22,7 @@ class Proxy {
         let bean;
 
         if (proxyID) {
-            bean = await R.findOne("proxy", " id = ? AND user_id = ? ", [ proxyID, userID ]);
+            bean = await R.findOne("proxy", " id = ? ", [ proxyID ]);
 
             if (!bean) {
                 throw new Error("proxy not found");
@@ -67,11 +67,10 @@ class Proxy {
     /**
      * Deletes proxy with given id and removes it from monitors
      * @param {number} proxyID ID of proxy to delete
-     * @param {number} userID ID of proxy owner
      * @returns {Promise<void>}
      */
-    static async delete(proxyID, userID) {
-        const bean = await R.findOne("proxy", " id = ? AND user_id = ? ", [ proxyID, userID ]);
+    static async delete(proxyID) {
+        const bean = await R.findOne("proxy", " id = ? ", [ proxyID ]);
 
         if (!bean) {
             throw new Error("proxy not found");
@@ -100,17 +99,17 @@ class Proxy {
         let jar = new CookieJar();
 
         const proxyOptions = {
-            protocol: proxy.protocol,
-            host: proxy.host,
-            port: proxy.port,
             cookies: { jar },
         };
 
+        const proxyUrl = new URL(`${proxy.protocol}://${proxy.host}:${proxy.port}`);
+
         if (proxy.auth) {
-            proxyOptions.auth = `${proxy.username}:${proxy.password}`;
+            proxyUrl.username = proxy.username;
+            proxyUrl.password = proxy.password;
         }
 
-        debug(`Proxy Options: ${JSON.stringify(proxyOptions)}`);
+        debug(`Proxy URL: ${proxyUrl.toString()}`);
         debug(`HTTP Agent Options: ${JSON.stringify(httpAgentOptions)}`);
         debug(`HTTPS Agent Options: ${JSON.stringify(httpsAgentOptions)}`);
 
@@ -122,15 +121,15 @@ class Proxy {
                 // eslint-disable-next-line no-case-declarations
                 const HttpsCookieProxyAgent = createCookieAgent(HttpsProxyAgent);
 
-                httpAgent = new HttpCookieProxyAgent({
-                    ...httpAgentOptions || {},
+                httpAgent = new HttpCookieProxyAgent(proxyUrl.toString(), {
+                    ...(httpAgentOptions || {}),
+                    ...proxyOptions,
+                });
+                httpsAgent = new HttpsCookieProxyAgent(proxyUrl.toString(), {
+                    ...(httpsAgentOptions || {}),
                     ...proxyOptions,
                 });
 
-                httpsAgent = new HttpsCookieProxyAgent({
-                    ...httpsAgentOptions || {},
-                    ...proxyOptions,
-                });
                 break;
             case "socks":
             case "socks5":
@@ -138,10 +137,9 @@ class Proxy {
             case "socks4":
                 // eslint-disable-next-line no-case-declarations
                 const SocksCookieProxyAgent = createCookieAgent(SocksProxyAgent);
-                agent = new SocksCookieProxyAgent({
+                agent = new SocksCookieProxyAgent(proxyUrl.toString(), {
                     ...httpAgentOptions,
                     ...httpsAgentOptions,
-                    ...proxyOptions,
                     tls: {
                         rejectUnauthorized: httpsAgentOptions.rejectUnauthorized,
                     },
@@ -182,12 +180,11 @@ class Proxy {
 /**
  * Applies given proxy id to monitors
  * @param {number} proxyID ID of proxy to apply
- * @param {number} userID ID of proxy owner
  * @returns {Promise<void>}
  */
-async function applyProxyEveryMonitor(proxyID, userID) {
+async function applyProxyEveryMonitor(proxyID) {
     // Find all monitors with id and proxy id
-    const monitors = await R.getAll("SELECT id, proxy_id FROM monitor WHERE user_id = ?", [ userID ]);
+    const monitors = await R.getAll("SELECT id, proxy_id FROM monitor");
 
     // Update proxy id not match with given proxy id
     for (const monitor of monitors) {

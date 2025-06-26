@@ -1,6 +1,6 @@
 <template>
     <div :class="classes">
-        <div v-if="! $root.socket.connected && ! $root.socket.firstConnect" class="lost-connection">
+        <div v-if="! $root.socket.connected && ! $root.socket.firstConnect" class="lost-connection" data-testid="lost-connection">
             <div class="container-fluid">
                 {{ $root.connectionErrorMsg }}
                 <div v-if="$root.showReverseProxyGuide">
@@ -16,7 +16,7 @@
                 <span class="fs-4 title">{{ $t("Uptime Kuma") }}</span>
             </router-link>
 
-            <a v-if="hasNewVersion" target="_blank" href="https://github.com/louislam/uptime-kuma/releases" class="btn btn-info me-3">
+            <a v-if="hasNewVersion" target="_blank" href="https://github.com/louislam/uptime-kuma/releases" class="btn btn-primary me-3">
                 <font-awesome-icon icon="arrow-alt-circle-up" /> {{ $t("New Update") }}
             </a>
 

@@ -150,6 +150,7 @@ const { resetChrome } = require("./monitor-types/real-browser-monitor-type");
 const { EmbeddedMariaDB } = require("./embedded-mariadb");
 const { SetupDatabase } = require("./setup-database");
 const { chartSocketHandler } = require("./socket-handlers/chart-socket-handler");
+const { sendUserList, getUser, saveUser } = require("./user");
 
 app.use(express.json());
 
@@ -493,8 +494,8 @@ let needSetup = false;
                     return;
                 }
 
-                checkLogin(socket);
-                await doubleCheckPassword(socket, currentPassword);
+                await checkLogin(socket);
+                await doubleCheckPassword(socket.userID, currentPassword);
 
                 let user = await R.findOne("user", " id = ? AND active = 1 ", [
                     socket.userID,
@@ -543,8 +544,8 @@ let needSetup = false;
                     return;
                 }
 
-                checkLogin(socket);
-                await doubleCheckPassword(socket, currentPassword);
+                await checkLogin(socket);
+                await doubleCheckPassword(socket.userID, currentPassword);
 
                 await R.exec("UPDATE `user` SET twofa_status = 1 WHERE id = ? ", [
                     socket.userID,
@@ -576,8 +577,8 @@ let needSetup = false;
                     return;
                 }
 
-                checkLogin(socket);
-                await doubleCheckPassword(socket, currentPassword);
+                await checkLogin(socket);
+                await doubleCheckPassword(socket.userID, currentPassword);
                 await TwoFA.disable2FA(socket.userID);
 
                 log.info("auth", `Disabled 2FA token. IP=${clientIP}`);
@@ -600,8 +601,8 @@ let needSetup = false;
 
         socket.on("verifyToken", async (token, currentPassword, callback) => {
             try {
-                checkLogin(socket);
-                await doubleCheckPassword(socket, currentPassword);
+                await checkLogin(socket);
+                await doubleCheckPassword(socket.userID, currentPassword);
 
                 let user = await R.findOne("user", " id = ? AND active = 1 ", [
                     socket.userID,
@@ -633,7 +634,7 @@ let needSetup = false;
 
         socket.on("twoFAStatus", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let user = await R.findOne("user", " id = ? AND active = 1 ", [
                     socket.userID,
@@ -668,13 +669,9 @@ let needSetup = false;
                     throw new Error("Password is too weak. It should contain alphabetic and numeric characters. It must be at least 6 characters in length.");
                 }
 
-                if ((await R.knex("user").count("id as count").first()).count !== 0) {
-                    throw new Error("Uptime Kuma has been initialized. If you want to run setup again, please delete the database.");
-                }
-
                 let user = R.dispense("user");
                 user.username = username;
-                user.password = passwordHash.generate(password);
+                user.password = await passwordHash.generate(password);
                 await R.store(user);
 
                 needSetup = false;
@@ -697,10 +694,65 @@ let needSetup = false;
         // Auth Only API
         // ***************************
 
+        socket.on("getUsers", async callback => {
+            try {
+                await checkLogin(socket);
+
+                const users = await sendUserList(socket);
+
+                callback({
+                    ok: true,
+                    users
+                });
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        socket.on("getUser", async (userID, callback) => {
+            try {
+                await checkLogin(socket);
+
+                const user = await getUser(userID);
+
+                callback({
+                    ok: true,
+                    user
+                });
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
+        socket.on("saveUser", async (user, callback) => {
+            try {
+                await checkLogin(socket);
+
+                await saveUser(socket, user);
+                await sendUserList(socket);
+
+                callback({
+                    ok: true,
+                    msg: "Saved Successfully.",
+                });
+            } catch (e) {
+                callback({
+                    ok: false,
+                    msg: e.message,
+                });
+            }
+        });
+
         // Add a new monitor
         socket.on("add", async (monitor, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 let bean = R.dispense("monitor");
 
                 let notificationIDList = monitor.notificationIDList;
@@ -717,6 +769,8 @@ let needSetup = false;
                 monitor.kafkaProducerSaslOptions = JSON.stringify(monitor.kafkaProducerSaslOptions);
 
                 monitor.conditions = JSON.stringify(monitor.conditions);
+
+                monitor.rabbitmqNodes = JSON.stringify(monitor.rabbitmqNodes);
 
                 bean.import(monitor);
                 bean.user_id = socket.userID;
@@ -757,13 +811,9 @@ let needSetup = false;
         socket.on("editMonitor", async (monitor, callback) => {
             try {
                 let removeGroupChildren = false;
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let bean = await R.findOne("monitor", " id = ? ", [ monitor.id ]);
-
-                if (bean.user_id !== socket.userID) {
-                    throw new Error("Permission denied.");
-                }
 
                 // Check if Parent is Descendant (would cause endless loop)
                 if (monitor.parent !== null) {
@@ -790,6 +840,7 @@ let needSetup = false;
                 bean.url = monitor.url;
                 bean.method = monitor.method;
                 bean.body = monitor.body;
+                bean.ipFamily = monitor.ipFamily;
                 bean.headers = monitor.headers;
                 bean.basic_auth_user = monitor.basic_auth_user;
                 bean.basic_auth_pass = monitor.basic_auth_pass;
@@ -864,11 +915,21 @@ let needSetup = false;
                     monitor.kafkaProducerAllowAutoTopicCreation;
                 bean.gamedigGivenPortOnly = monitor.gamedigGivenPortOnly;
                 bean.remote_browser = monitor.remote_browser;
+                bean.smtpSecurity = monitor.smtpSecurity;
                 bean.snmpVersion = monitor.snmpVersion;
                 bean.snmpOid = monitor.snmpOid;
                 bean.jsonPathOperator = monitor.jsonPathOperator;
                 bean.timeout = monitor.timeout;
+                bean.rabbitmqNodes = JSON.stringify(monitor.rabbitmqNodes);
+                bean.rabbitmqUsername = monitor.rabbitmqUsername;
+                bean.rabbitmqPassword = monitor.rabbitmqPassword;
                 bean.conditions = JSON.stringify(monitor.conditions);
+                bean.manual_status = monitor.manual_status;
+
+                // ping advanced options
+                bean.ping_numeric = monitor.ping_numeric;
+                bean.ping_count = monitor.ping_count;
+                bean.ping_per_request_timeout = monitor.ping_per_request_timeout;
 
                 bean.validate();
 
@@ -904,7 +965,7 @@ let needSetup = false;
 
         socket.on("getMonitorList", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 await server.sendMonitorList(socket);
                 callback({
                     ok: true,
@@ -920,14 +981,11 @@ let needSetup = false;
 
         socket.on("getMonitor", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("monitor", `Get Monitor: ${monitorID} User ID: ${socket.userID}`);
 
-                let monitor = await R.findOne("monitor", " id = ? AND user_id = ? ", [
-                    monitorID,
-                    socket.userID,
-                ]);
+                let monitor = await R.findOne("monitor", " id = ? ", [ monitorID ]);
                 const monitorData = [{ id: monitor.id,
                     active: monitor.active
                 }];
@@ -947,7 +1005,7 @@ let needSetup = false;
 
         socket.on("getMonitorBeats", async (monitorID, period, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("monitor", `Get Monitor Beats: ${monitorID} User ID: ${socket.userID}`);
 
@@ -983,7 +1041,7 @@ let needSetup = false;
         // Start or Resume the monitor
         socket.on("resumeMonitor", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 await startMonitor(socket.userID, monitorID);
                 await server.sendUpdateMonitorIntoList(socket, monitorID);
 
@@ -1003,7 +1061,7 @@ let needSetup = false;
 
         socket.on("pauseMonitor", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 await pauseMonitor(socket.userID, monitorID);
                 await server.sendUpdateMonitorIntoList(socket, monitorID);
 
@@ -1023,7 +1081,7 @@ let needSetup = false;
 
         socket.on("deleteMonitor", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("manage", `Delete Monitor: ${monitorID} User ID: ${socket.userID}`);
 
@@ -1034,10 +1092,7 @@ let needSetup = false;
 
                 const startTime = Date.now();
 
-                await R.exec("DELETE FROM monitor WHERE id = ? AND user_id = ? ", [
-                    monitorID,
-                    socket.userID,
-                ]);
+                await R.exec("DELETE FROM monitor WHERE id = ? ", [ monitorID ]);
 
                 // Fix #2880
                 apicache.clear();
@@ -1063,7 +1118,7 @@ let needSetup = false;
 
         socket.on("getTags", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 const list = await R.findAll("tag");
 
@@ -1082,7 +1137,7 @@ let needSetup = false;
 
         socket.on("addTag", async (tag, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let bean = R.dispense("tag");
                 bean.name = tag.name;
@@ -1104,7 +1159,7 @@ let needSetup = false;
 
         socket.on("editTag", async (tag, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let bean = await R.findOne("tag", " id = ? ", [ tag.id ]);
                 if (bean == null) {
@@ -1136,7 +1191,7 @@ let needSetup = false;
 
         socket.on("deleteTag", async (tagID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 await R.exec("DELETE FROM tag WHERE id = ? ", [ tagID ]);
 
@@ -1156,7 +1211,7 @@ let needSetup = false;
 
         socket.on("addMonitorTag", async (tagID, monitorID, value, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 await R.exec("INSERT INTO monitor_tag (tag_id, monitor_id, value) VALUES (?, ?, ?)", [
                     tagID,
@@ -1180,7 +1235,7 @@ let needSetup = false;
 
         socket.on("editMonitorTag", async (tagID, monitorID, value, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 await R.exec("UPDATE monitor_tag SET value = ? WHERE tag_id = ? AND monitor_id = ?", [
                     value,
@@ -1204,7 +1259,7 @@ let needSetup = false;
 
         socket.on("deleteMonitorTag", async (tagID, monitorID, value, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 await R.exec("DELETE FROM monitor_tag WHERE tag_id = ? AND monitor_id = ? AND value = ?", [
                     tagID,
@@ -1292,9 +1347,9 @@ let needSetup = false;
             }
         });
 
-        socket.on("changePassword", async (password, callback) => {
+        socket.on("changePassword", async (userID, password, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 if (!password.newPassword) {
                     throw new Error("Invalid new password");
@@ -1304,7 +1359,7 @@ let needSetup = false;
                     throw new Error("Password is too weak. It should contain alphabetic and numeric characters. It must be at least 6 characters in length.");
                 }
 
-                let user = await doubleCheckPassword(socket, password.currentPassword);
+                let user = await doubleCheckPassword(userID, password.currentPassword);
                 await user.resetPassword(password.newPassword);
 
                 server.disconnectAllSocketClients(user.id, socket.id);
@@ -1326,7 +1381,7 @@ let needSetup = false;
 
         socket.on("getSettings", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 const data = await getSettings("general");
 
                 if (!data.serverTimezone) {
@@ -1348,7 +1403,7 @@ let needSetup = false;
 
         socket.on("setSettings", async (data, currentPassword, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 // If currently is disabled auth, don't need to check
                 // Disabled Auth + Want to Disable Auth => No Check
@@ -1412,7 +1467,7 @@ let needSetup = false;
         // Add or Edit
         socket.on("addNotification", async (notification, notificationID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let notificationBean = await Notification.save(notification, notificationID, socket.userID);
                 await sendNotificationList(socket);
@@ -1434,7 +1489,7 @@ let needSetup = false;
 
         socket.on("deleteNotification", async (notificationID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 await Notification.delete(notificationID, socket.userID);
                 await sendNotificationList(socket);
@@ -1455,7 +1510,7 @@ let needSetup = false;
 
         socket.on("testNotification", async (notification, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 let msg = await Notification.send(notification, notification.name + " Testing");
 
@@ -1476,7 +1531,7 @@ let needSetup = false;
 
         socket.on("checkApprise", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
                 callback(Notification.checkApprise());
             } catch (e) {
                 callback(false);
@@ -1485,7 +1540,7 @@ let needSetup = false;
 
         socket.on("clearEvents", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("manage", `Clear Events Monitor: ${monitorID} User ID: ${socket.userID}`);
 
@@ -1509,7 +1564,7 @@ let needSetup = false;
 
         socket.on("clearHeartbeats", async (monitorID, callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("manage", `Clear Heartbeats Monitor: ${monitorID} User ID: ${socket.userID}`);
 
@@ -1533,7 +1588,7 @@ let needSetup = false;
 
         socket.on("clearStatistics", async (callback) => {
             try {
-                checkLogin(socket);
+                await checkLogin(socket);
 
                 log.info("manage", `Clear Statistics User ID: ${socket.userID}`);
 
@@ -1599,17 +1654,19 @@ let needSetup = false;
 
     await server.start();
 
-    server.httpServer.listen(port, hostname, () => {
+    server.httpServer.listen(port, hostname, async () => {
         if (hostname) {
             log.info("server", `Listening on ${hostname}:${port}`);
         } else {
             log.info("server", `Listening on ${port}`);
         }
-        startMonitors();
+        await startMonitors();
+
+        // Put this here. Start background jobs after the db and server is ready to prevent clear up during db migration.
+        await initBackgroundJobs();
+
         checkVersion.startInterval();
     });
-
-    await initBackgroundJobs();
 
     // Start cloudflared at the end if configured
     await cloudflaredAutoStart(cloudflaredToken);
@@ -1639,24 +1696,6 @@ async function updateMonitorNotification(monitorID, notificationIDList) {
 }
 
 /**
- * Check if a given user owns a specific monitor
- * @param {number} userID ID of user to check
- * @param {number} monitorID ID of monitor to check
- * @returns {Promise<void>}
- * @throws {Error} The specified user does not own the monitor
- */
-async function checkOwner(userID, monitorID) {
-    let row = await R.getRow("SELECT id FROM monitor WHERE id = ? AND user_id = ? ", [
-        monitorID,
-        userID,
-    ]);
-
-    if (! row) {
-        throw new Error("You do not own this monitor.");
-    }
-}
-
-/**
  * Function called after user login
  * This function is used to send the heartbeat list of a monitor.
  * @param {Socket} socket Socket.io instance
@@ -1677,6 +1716,7 @@ async function afterLogin(socket, user) {
         sendAPIKeyList(socket),
         sendRemoteBrowserList(socket),
         sendMonitorTypeList(socket),
+        sendUserList(socket),
     ]);
 
     await StatusPage.sendStatusPageList(io, socket);
@@ -1709,7 +1749,7 @@ async function initDatabase(testMode = false) {
     log.info("server", "Connected to the database");
 
     // Patch the database
-    await Database.patch();
+    await Database.patch(port, hostname);
 
     let jwtSecretBean = await R.findOne("setting", " `key` = ? ", [
         "jwtSecret",
@@ -1739,14 +1779,9 @@ async function initDatabase(testMode = false) {
  * @returns {Promise<void>}
  */
 async function startMonitor(userID, monitorID) {
-    await checkOwner(userID, monitorID);
-
     log.info("manage", `Resume Monitor: ${monitorID} User ID: ${userID}`);
 
-    await R.exec("UPDATE monitor SET active = 1 WHERE id = ? AND user_id = ? ", [
-        monitorID,
-        userID,
-    ]);
+    await R.exec("UPDATE monitor SET active = 1 WHERE id = ? ", [ monitorID ]);
 
     let monitor = await R.findOne("monitor", " id = ? ", [
         monitorID,
@@ -1777,14 +1812,9 @@ async function restartMonitor(userID, monitorID) {
  * @returns {Promise<void>}
  */
 async function pauseMonitor(userID, monitorID) {
-    await checkOwner(userID, monitorID);
-
     log.info("manage", `Pause Monitor: ${monitorID} User ID: ${userID}`);
 
-    await R.exec("UPDATE monitor SET active = 0 WHERE id = ? AND user_id = ? ", [
-        monitorID,
-        userID,
-    ]);
+    await R.exec("UPDATE monitor SET active = 0 WHERE id = ? ", [ monitorID ]);
 
     if (monitorID in server.monitorList) {
         await server.monitorList[monitorID].stop();
@@ -1804,7 +1834,11 @@ async function startMonitors() {
     }
 
     for (let monitor of list) {
-        await monitor.start(io);
+        try {
+            await monitor.start(io);
+        } catch (e) {
+            log.error("monitor", e);
+        }
         // Give some delays, so all monitors won't make request at the same moment when just start the server.
         await sleep(getRandomInt(300, 1000));
     }
